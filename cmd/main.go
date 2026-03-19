@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
@@ -10,7 +11,6 @@ import (
 	"github.com/dovakiin0/proxy-m3u8/config"
 	"github.com/dovakiin0/proxy-m3u8/internal/handler"
 	mdlware "github.com/dovakiin0/proxy-m3u8/internal/middleware"
-	"github.com/dovakiin0/proxy-m3u8/internal/utils"
 )
 
 func init() {
@@ -27,10 +27,18 @@ func main() {
 	e.Use(middleware.Recover())
 	e.Pre(middleware.RemoveTrailingSlash())
 
-	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: utils.GetCorsDomain(),
-		AllowMethods: []string{echo.GET, echo.POST, echo.PUT, echo.DELETE, echo.OPTIONS},
-	}))
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			h := c.Response().Header()
+			h.Set("Access-Control-Allow-Origin", "*")
+			h.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Range")
+			if c.Request().Method == http.MethodOptions {
+				return c.NoContent(http.StatusNoContent)
+			}
+			return next(c)
+		}
+	})
 
 	customCacheConfig := mdlware.CacheControlConfig{
 		MaxAge:         3600, // 1 hour
