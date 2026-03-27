@@ -69,24 +69,18 @@ func ProcessM3U8Stream(reader io.Reader, writer io.Writer, originalM3U8URL, prox
 		// Trim whitespace from the line for accurate suffix checking
 		trimmedLine := strings.TrimSpace(line)
 
-		if strings.HasPrefix(trimmedLine, "#") || trimmedLine == "" {
-			// It's a comment or empty line, pass through
+		if trimmedLine == "" {
 			modifiedLine = line
-		} else if strings.HasSuffix(trimmedLine, ".m3u8") || strings.HasSuffix(trimmedLine, ".ts") {
-			// These are segments or nested playlists, assumed relative to the M3U8's base URL
+		} else if strings.HasPrefix(trimmedLine, "#") {
+			// Rewrite URI="..." inside tag lines (e.g. EXT-X-KEY, EXT-X-MAP)
+			modifiedLine = rewriteTagURIs(line, baseUrlForRelativePaths, proxyPrefix, refererSuffix)
+		} else {
+			// For all non-comment lines, proxy the resource (segments, playlists, or extension-less URLs)
 			if isAbsoluteURL(trimmedLine) {
 				modifiedLine = proxyPrefix + url.QueryEscape(trimmedLine) + refererSuffix
 			} else {
-				// Construct absolute URL from baseUrlForRelativePaths and the relative line
 				absoluteSegmentURL := resolveURL(baseUrlForRelativePaths, trimmedLine)
 				modifiedLine = proxyPrefix + url.QueryEscape(absoluteSegmentURL) + refererSuffix
-			}
-		} else if IsAllowedStaticExtension(trimmedLine) {
-			if isAbsoluteURL(trimmedLine) {
-				modifiedLine = proxyPrefix + url.QueryEscape(trimmedLine) + refererSuffix
-			} else {
-				absoluteResourceURL := resolveURL(baseUrlForRelativePaths, trimmedLine)
-				modifiedLine = proxyPrefix + url.QueryEscape(absoluteResourceURL) + refererSuffix
 			}
 		}
 
@@ -96,6 +90,41 @@ func ProcessM3U8Stream(reader io.Reader, writer io.Writer, originalM3U8URL, prox
 	}
 
 	return scanner.Err()
+}
+
+// rewriteTagURIs rewrites URI="..." in HLS tag lines to pass through the proxy.
+func rewriteTagURIs(line, baseURL, proxyPrefix, refererSuffix string) string {
+	needle := `URI="`
+	start := strings.Index(line, needle)
+	if start == -1 {
+		return line
+	}
+
+	result := line
+	offset := 0
+	for {
+		idx := strings.Index(result[offset:], needle)
+		if idx == -1 {
+			break
+		}
+		idx += offset
+		valStart := idx + len(needle)
+		valEnd := strings.Index(result[valStart:], `"`)
+		if valEnd == -1 {
+			break
+		}
+		valEnd = valStart + valEnd
+		uri := result[valStart:valEnd]
+		target := uri
+		if !isAbsoluteURL(uri) {
+			target = resolveURL(baseURL, uri)
+		}
+		proxied := proxyPrefix + url.QueryEscape(target) + refererSuffix
+		result = result[:valStart] + proxied + result[valEnd:]
+		offset = valStart + len(proxied)
+	}
+
+	return result
 }
 
 func isAbsoluteURL(line string) bool {
