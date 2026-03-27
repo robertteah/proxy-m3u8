@@ -126,7 +126,7 @@ func M3U8ProxyHandler(c echo.Context) error {
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	req.Header.Set("Sec-Ch-Ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
 	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
@@ -134,10 +134,19 @@ func M3U8ProxyHandler(c echo.Context) error {
 	// if the referer is provided, set it in the request headers
 	if refererHeader != "" {
 		req.Header.Set("Referer", refererHeader)
-		req.Header.Set("Origin", refererHeader)
+		if refURL, parseErr := url.Parse(refererHeader); parseErr == nil {
+			refOrigin := refURL.Scheme + "://" + refURL.Host
+			req.Header.Set("Origin", refOrigin)
+		} else {
+			req.Header.Set("Origin", refererHeader)
+		}
 	} else if config.Env.DefaultReferer != "" {
 		req.Header.Set("Referer", config.Env.DefaultReferer)
-		req.Header.Set("Origin", strings.TrimSuffix(config.Env.DefaultReferer, "/"))
+		if refURL, parseErr := url.Parse(config.Env.DefaultReferer); parseErr == nil {
+			req.Header.Set("Origin", refURL.Scheme+ "://" + refURL.Host)
+		} else {
+			req.Header.Set("Origin", strings.TrimSuffix(config.Env.DefaultReferer, "/"))
+		}
 	} else {
 		// Fall back to the target's own origin as a last resort
 		req.Header.Set("Referer", targetOrigin+"/")
