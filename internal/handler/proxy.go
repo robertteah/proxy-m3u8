@@ -108,49 +108,60 @@ func M3U8ProxyHandler(c echo.Context) error {
 	isTS := strings.HasSuffix(strings.ToLower(targetURL), ".ts")
 	isOtherStatic := utils.IsStaticFileExtension(targetURL)
 
-	req, err := http.NewRequest("GET", targetURL, nil)
-	if err != nil {
-		log.Printf("Error creating request to target %s: %v", targetURL, err)
-		return c.String(http.StatusInternalServerError, "Failed to create request to target server")
-	}
-
 	// Parse target URL to extract origin
 	parsedURL, _ := url.Parse(targetURL)
 	targetOrigin := parsedURL.Scheme + "://" + parsedURL.Host
 
-	// Set browser-like headers to bypass Cloudflare
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	// Don't set Accept-Encoding manually - let Go's HTTP client handle compression automatically
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	req.Header.Set("Sec-Ch-Ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	buildRequest := func(withReferer bool) (*http.Request, error) {
+		req, err := http.NewRequest("GET", targetURL, nil)
+		if err != nil {
+			return nil, err
+		}
 
-	// if the referer is provided, set it in the request headers
-	if refererHeader != "" {
-		req.Header.Set("Referer", refererHeader)
-		if refURL, parseErr := url.Parse(refererHeader); parseErr == nil {
-			refOrigin := refURL.Scheme + "://" + refURL.Host
-			req.Header.Set("Origin", refOrigin)
-		} else {
-			req.Header.Set("Origin", refererHeader)
+		// Set browser-like headers to bypass Cloudflare
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		// Don't set Accept-Encoding manually - let Go's HTTP client handle compression automatically
+		req.Header.Set("Connection", "keep-alive")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Sec-Ch-Ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
+		req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+		req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+
+		if withReferer {
+			// if the referer is provided, set it in the request headers
+			if refererHeader != "" {
+				req.Header.Set("Referer", refererHeader)
+				if refURL, parseErr := url.Parse(refererHeader); parseErr == nil {
+					refOrigin := refURL.Scheme + "://" + refURL.Host
+					req.Header.Set("Origin", refOrigin)
+				} else {
+					req.Header.Set("Origin", refererHeader)
+				}
+			} else if config.Env.DefaultReferer != "" {
+				req.Header.Set("Referer", config.Env.DefaultReferer)
+				if refURL, parseErr := url.Parse(config.Env.DefaultReferer); parseErr == nil {
+					req.Header.Set("Origin", refURL.Scheme+"//"+refURL.Host)
+				} else {
+					req.Header.Set("Origin", strings.TrimSuffix(config.Env.DefaultReferer, "/"))
+				}
+			} else {
+				// Fall back to the target's own origin as a last resort
+				req.Header.Set("Referer", targetOrigin+"/")
+				req.Header.Set("Origin", targetOrigin)
+			}
 		}
-	} else if config.Env.DefaultReferer != "" {
-		req.Header.Set("Referer", config.Env.DefaultReferer)
-		if refURL, parseErr := url.Parse(config.Env.DefaultReferer); parseErr == nil {
-			req.Header.Set("Origin", refURL.Scheme+ "://" + refURL.Host)
-		} else {
-			req.Header.Set("Origin", strings.TrimSuffix(config.Env.DefaultReferer, "/"))
-		}
-	} else {
-		// Fall back to the target's own origin as a last resort
-		req.Header.Set("Referer", targetOrigin+"/")
-		req.Header.Set("Origin", targetOrigin)
+
+		return req, nil
+	}
+
+	req, err := buildRequest(true)
+	if err != nil {
+		log.Printf("Error creating request to target %s: %v", targetURL, err)
+		return c.String(http.StatusInternalServerError, "Failed to create request to target server")
 	}
 
 	upstreamResp, err := utils.ProxyHTTPClient.Do(req)
@@ -163,6 +174,23 @@ func M3U8ProxyHandler(c echo.Context) error {
 		return c.String(http.StatusBadGateway, "Failed to fetch content from upstream server")
 	}
 	defer upstreamResp.Body.Close()
+
+	// Retry once without Referer/Origin if upstream forbids the request
+	if upstreamResp.StatusCode == http.StatusForbidden {
+		upstreamResp.Body.Close()
+		retryReq, retryErr := buildRequest(false)
+		if retryErr == nil {
+			upstreamResp, err = utils.ProxyHTTPClient.Do(retryReq)
+			if err != nil {
+				log.Printf("Retry error fetching target URL %s: %v", targetURL, err)
+				if urlErr, ok := err.(*url.Error); ok && urlErr.Timeout() {
+					return c.String(http.StatusGatewayTimeout, "Upstream server timed out")
+				}
+				return c.String(http.StatusBadGateway, "Failed to fetch content from upstream server")
+			}
+			defer upstreamResp.Body.Close()
+		}
+	}
 
 	rawBodyBytes, err := io.ReadAll(upstreamResp.Body)
 	if err != nil {
