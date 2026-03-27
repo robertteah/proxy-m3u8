@@ -112,7 +112,7 @@ func M3U8ProxyHandler(c echo.Context) error {
 	parsedURL, _ := url.Parse(targetURL)
 	targetOrigin := parsedURL.Scheme + "://" + parsedURL.Host
 
-	buildRequest := func(withReferer bool) (*http.Request, error) {
+	buildRequest := func(mode string) (*http.Request, error) {
 		req, err := http.NewRequest("GET", targetURL, nil)
 		if err != nil {
 			return nil, err
@@ -126,12 +126,16 @@ func M3U8ProxyHandler(c echo.Context) error {
 		req.Header.Set("Connection", "keep-alive")
 		req.Header.Set("Sec-Fetch-Dest", "empty")
 		req.Header.Set("Sec-Fetch-Mode", "cors")
-		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		secFetchSite := "cross-site"
+		if mode == "target" {
+			secFetchSite = "same-site"
+		}
+		req.Header.Set("Sec-Fetch-Site", secFetchSite)
 		req.Header.Set("Sec-Ch-Ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
 		req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 		req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
 
-		if withReferer {
+		if mode == "referer" {
 			// if the referer is provided, set it in the request headers
 			if refererHeader != "" {
 				req.Header.Set("Referer", refererHeader)
@@ -153,44 +157,38 @@ func M3U8ProxyHandler(c echo.Context) error {
 				req.Header.Set("Referer", targetOrigin+"/")
 				req.Header.Set("Origin", targetOrigin)
 			}
+		} else if mode == "target" {
+			req.Header.Set("Referer", targetOrigin+"/")
+			req.Header.Set("Origin", targetOrigin)
 		}
 
 		return req, nil
 	}
 
-	req, err := buildRequest(true)
-	if err != nil {
-		log.Printf("Error creating request to target %s: %v", targetURL, err)
-		return c.String(http.StatusInternalServerError, "Failed to create request to target server")
-	}
-
-	upstreamResp, err := utils.ProxyHTTPClient.Do(req)
-	if err != nil {
-		log.Printf("Error fetching target URL %s: %v", targetURL, err)
-		// Check for timeout or other specific errors if needed
-		if urlErr, ok := err.(*url.Error); ok && urlErr.Timeout() {
-			return c.String(http.StatusGatewayTimeout, "Upstream server timed out")
+	var upstreamResp *http.Response
+	modes := []string{"referer", "none", "target"}
+	for _, mode := range modes {
+		req, err := buildRequest(mode)
+		if err != nil {
+			log.Printf("Error creating request to target %s: %v", targetURL, err)
+			return c.String(http.StatusInternalServerError, "Failed to create request to target server")
 		}
-		return c.String(http.StatusBadGateway, "Failed to fetch content from upstream server")
+
+		upstreamResp, err = utils.ProxyHTTPClient.Do(req)
+		if err != nil {
+			log.Printf("Error fetching target URL %s: %v", targetURL, err)
+			// Check for timeout or other specific errors if needed
+			if urlErr, ok := err.(*url.Error); ok && urlErr.Timeout() {
+				return c.String(http.StatusGatewayTimeout, "Upstream server timed out")
+			}
+			return c.String(http.StatusBadGateway, "Failed to fetch content from upstream server")
+		}
+		if upstreamResp.StatusCode != http.StatusForbidden {
+			break
+		}
+		upstreamResp.Body.Close()
 	}
 	defer upstreamResp.Body.Close()
-
-	// Retry once without Referer/Origin if upstream forbids the request
-	if upstreamResp.StatusCode == http.StatusForbidden {
-		upstreamResp.Body.Close()
-		retryReq, retryErr := buildRequest(false)
-		if retryErr == nil {
-			upstreamResp, err = utils.ProxyHTTPClient.Do(retryReq)
-			if err != nil {
-				log.Printf("Retry error fetching target URL %s: %v", targetURL, err)
-				if urlErr, ok := err.(*url.Error); ok && urlErr.Timeout() {
-					return c.String(http.StatusGatewayTimeout, "Upstream server timed out")
-				}
-				return c.String(http.StatusBadGateway, "Failed to fetch content from upstream server")
-			}
-			defer upstreamResp.Body.Close()
-		}
-	}
 
 	rawBodyBytes, err := io.ReadAll(upstreamResp.Body)
 	if err != nil {
