@@ -166,6 +166,7 @@ func M3U8ProxyHandler(c echo.Context) error {
 	}
 
 	var upstreamResp *http.Response
+	var rawBodyBytes []byte
 	modes := []string{"referer", "none", "target"}
 	for _, mode := range modes {
 		req, err := buildRequest(mode)
@@ -183,17 +184,20 @@ func M3U8ProxyHandler(c echo.Context) error {
 			}
 			return c.String(http.StatusBadGateway, "Failed to fetch content from upstream server")
 		}
+
+		rawBodyBytes, err = io.ReadAll(upstreamResp.Body)
+		upstreamResp.Body.Close()
+		if err != nil {
+			log.Printf("Error reading response body from upstream %s: %v", targetURL, err)
+			if upstreamResp.StatusCode == http.StatusForbidden {
+				continue
+			}
+			return c.String(http.StatusInternalServerError, "Failed to read response from upstream server")
+		}
+
 		if upstreamResp.StatusCode != http.StatusForbidden {
 			break
 		}
-		upstreamResp.Body.Close()
-	}
-	defer upstreamResp.Body.Close()
-
-	rawBodyBytes, err := io.ReadAll(upstreamResp.Body)
-	if err != nil {
-		log.Printf("Error reading response body from upstream %s: %v", targetURL, err)
-		return c.String(http.StatusInternalServerError, "Failed to read response from upstream server")
 	}
 
 	var responseBodyBytes []byte
